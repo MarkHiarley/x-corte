@@ -3,7 +3,7 @@
 
 const PromoDiv = () => {
 
-    // fazer uma verificação para ver se ta logado como admin ou user e se admin por uma opcao de editar a promoção
+    // fazer uma funcao para pegar o desconto do banco de dados das promocoes
 
     return (
         <div className="w-10/12 h-3/12 bg-[#0E4587] rounded-lg text-white flex flex-col justify-center p-4 ">
