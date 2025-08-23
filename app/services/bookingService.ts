@@ -62,18 +62,20 @@ export const bookingService = {
     async getBookingsByDate(enterpriseEmail: string, date: string) {
         try {
             const bookingsCollectionPath = `enterprises/${enterpriseEmail}/bookings`;
+
+            // Query simples por data para evitar necessidade de índices compostos
             const bookingsQuery = query(
                 collection(db, bookingsCollectionPath),
-                where('date', '==', date),
-                where('status', 'in', ['confirmed', 'pending']),
-                orderBy('startTime')
+                where('date', '==', date)
             );
 
             const snapshot = await getDocs(bookingsQuery);
-            const bookings = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data()
-            }));
+            
+            // Filtrar status e ordenar localmente
+            const bookings = snapshot.docs
+                .map(d => ({ id: d.id, ...(d.data() as any) }))
+                .filter((b: any) => ['confirmed', 'pending'].includes(b.status))
+                .sort((a: any, b: any) => a.startTime.localeCompare(b.startTime));
 
             return {
                 success: true,
@@ -142,18 +144,26 @@ export const bookingService = {
         duration: number
     ): Promise<{ success: boolean; data?: AvailableSlot[]; error?: string }> {
         try {
-            // Buscar o schedule padrão da empresa
-            const schedulesResult = await scheduleService.getAllSchedules(enterpriseEmail);
-            if (!schedulesResult.success) {
-                return {
-                    success: false,
-                    error: 'error' in schedulesResult ? schedulesResult.error : 'Erro ao buscar schedules'
-                };
+            // Primeiro tente buscar o schedule padrão diretamente
+            let defaultScheduleResult = await scheduleService.getDefaultSchedule(enterpriseEmail);
+            let defaultSchedule: any = null;
+
+            if (defaultScheduleResult.success && 'data' in defaultScheduleResult) {
+                defaultSchedule = defaultScheduleResult.data;
+            } else {
+                // Fallback: buscar todos e encontrar o isDefault (compatibilidade)
+                const schedulesResult = await scheduleService.getAllSchedules(enterpriseEmail);
+                if (!schedulesResult.success) {
+                    return {
+                        success: false,
+                        error: 'error' in schedulesResult ? schedulesResult.error : 'Erro ao buscar schedules'
+                    };
+                }
+
+                const schedules = 'data' in schedulesResult ? schedulesResult.data : [];
+                defaultSchedule = schedules.find((s: any) => s.isDefault) || null;
             }
 
-            const schedules = 'data' in schedulesResult ? schedulesResult.data : [];
-            const defaultSchedule = schedules.find((s: any) => s.isDefault);
-            
             if (!defaultSchedule) {
                 return {
                     success: false,
@@ -163,13 +173,42 @@ export const bookingService = {
 
             // Determinar o dia da semana (assumindo formato YYYY-MM-DD)
             const dateObj = new Date(date + 'T00:00:00');
-            const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-            const dayOfWeek = dayNames[dateObj.getDay()];
+            const dayIndex = dateObj.getDay(); // 0=Sunday ... 6=Saturday
 
-            // Encontrar a disponibilidade para este dia
-            const dayAvailability = defaultSchedule.availability.find(
-                (avail: any) => avail.days.includes(dayOfWeek)
-            );
+            // Normalizações de nomes de dias para compatibilidade (English / Português)
+            const dayNamesEN = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+            const dayNamesPT = ['domingo','segunda','terca','terça','quarta','quinta','sexta','sabado','sábado'];
+            const dayNameEN = dayNamesEN[dayIndex];
+
+            // Encontrar a disponibilidade para este dia com comparação tolerante
+            const availabilityArray = Array.isArray(defaultSchedule.availability) ? defaultSchedule.availability : [];
+
+            const dayAvailability = availabilityArray.find((avail: any) => {
+                if (!avail || !Array.isArray(avail.days)) return false;
+
+                // Normalizar os dias configurados
+                const normalizedDays = avail.days.map((d: any) => {
+                    if (typeof d === 'number') return String(d);
+                    if (typeof d === 'string') return d.toLowerCase().trim();
+                    return String(d);
+                });
+
+                // Possíveis matches:
+                // - contém o índice do dia (0..6) como string
+                // - contém o nome em inglês (monday)
+                // - contém o nome em português (segunda, terça, etc.)
+                if (normalizedDays.includes(String(dayIndex))) return true;
+                if (normalizedDays.includes(dayNameEN)) return true;
+
+                // Checar PT: verificar se alguma entrada começa com as 3 primeiras letras de PT (ex: 'seg' ou 'segunda')
+                const dayPtShort = ['domingo','segunda','terca','quarta','quinta','sexta','sabado'][dayIndex];
+                if (normalizedDays.some((d: string) => d.startsWith(dayPtShort.slice(0,3)))) return true;
+
+                // Checar se qualquer entrada em PT corresponde exatamente
+                if (normalizedDays.some((d: string) => dayNamesPT.includes(d))) return normalizedDays.some((d: string) => dayNamesPT.indexOf(d) === dayIndex);
+
+                return false;
+            });
 
             if (!dayAvailability) {
                 return {
@@ -178,18 +217,32 @@ export const bookingService = {
                 };
             }
 
-            // Gerar slots de tempo
-            const slots: AvailableSlot[] = [];
+            // Validar horário de início/fim
+            if (!dayAvailability.startTime || !dayAvailability.endTime) {
+                return {
+                    success: true,
+                    data: []
+                };
+            }
+
             const startMinutes = this.timeToMinutes(dayAvailability.startTime);
             const endMinutes = this.timeToMinutes(dayAvailability.endTime);
-            
-            // Intervalo de 15 minutos entre slots
+
+            if (isNaN(startMinutes) || isNaN(endMinutes) || endMinutes <= startMinutes) {
+                return {
+                    success: true,
+                    data: []
+                };
+            }
+
+            // Intervalo de 15 minutos entre slots (pode ser parametrizado no futuro)
             const slotInterval = 15;
-            
+            const slots: AvailableSlot[] = [];
+
             for (let minutes = startMinutes; minutes <= endMinutes - duration; minutes += slotInterval) {
                 const slotStartTime = this.minutesToTime(minutes);
                 const slotEndTime = this.addMinutesToTime(slotStartTime, duration);
-                
+
                 // Verificar se o slot está disponível
                 const availability = await this.isTimeSlotAvailable(
                     enterpriseEmail,
