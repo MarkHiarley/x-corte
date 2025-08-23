@@ -18,7 +18,6 @@ import { scheduleService } from './scheduleService';
 import { productService } from './productService';
 
 export const bookingService = {
-    // Utilitários de tempo
     timeToMinutes(time: string): number {
         const [hours, minutes] = time.split(':').map(Number);
         return hours * 60 + minutes;
@@ -35,7 +34,6 @@ export const bookingService = {
         return this.minutesToTime(totalMinutes);
     },
 
-    // Verificar se a empresa existe
     async checkEnterpriseExists(email: string) {
         try {
             const enterpriseRef = doc(db, 'enterprises', email);
@@ -58,20 +56,15 @@ export const bookingService = {
         }
     },
 
-    // Buscar agendamentos de uma data específica
     async getBookingsByDate(enterpriseEmail: string, date: string) {
         try {
             const bookingsCollectionPath = `enterprises/${enterpriseEmail}/bookings`;
-
-            // Query simples por data para evitar necessidade de índices compostos
             const bookingsQuery = query(
                 collection(db, bookingsCollectionPath),
                 where('date', '==', date)
             );
 
             const snapshot = await getDocs(bookingsQuery);
-            
-            // Filtrar status e ordenar localmente
             const bookings = snapshot.docs
                 .map(d => ({ id: d.id, ...(d.data() as any) }))
                 .filter((b: any) => ['confirmed', 'pending'].includes(b.status))
@@ -91,7 +84,6 @@ export const bookingService = {
         }
     },
 
-    // Verificar se um horário está disponível
     async isTimeSlotAvailable(
         enterpriseEmail: string,
         date: string,
@@ -107,8 +99,6 @@ export const bookingService = {
             }
 
             const bookings = bookingsResult.data || [];
-            
-            // Converter horários para minutos para facilitar comparação
             const newStartMinutes = this.timeToMinutes(startTime);
             const newEndMinutes = this.timeToMinutes(endTime);
 
@@ -116,7 +106,6 @@ export const bookingService = {
                 const bookingStartMinutes = this.timeToMinutes(booking.startTime);
                 const bookingEndMinutes = this.timeToMinutes(booking.endTime);
 
-                // Verificar sobreposição
                 if (
                     (newStartMinutes >= bookingStartMinutes && newStartMinutes < bookingEndMinutes) ||
                     (newEndMinutes > bookingStartMinutes && newEndMinutes <= bookingEndMinutes) ||
@@ -137,124 +126,63 @@ export const bookingService = {
         }
     },
 
-    // Gerar slots disponíveis para uma data
     async getAvailableSlots(
         enterpriseEmail: string,
         date: string,
         duration: number
     ): Promise<{ success: boolean; data?: AvailableSlot[]; error?: string }> {
         try {
-            // Primeiro tente buscar o schedule padrão diretamente
-            let defaultScheduleResult = await scheduleService.getDefaultSchedule(enterpriseEmail);
-            let defaultSchedule: any = null;
-
-            if (defaultScheduleResult.success && 'data' in defaultScheduleResult) {
-                defaultSchedule = defaultScheduleResult.data;
-            } else {
-                // Fallback: buscar todos e encontrar o isDefault (compatibilidade)
-                const schedulesResult = await scheduleService.getAllSchedules(enterpriseEmail);
-                if (!schedulesResult.success) {
-                    return {
-                        success: false,
-                        error: 'error' in schedulesResult ? schedulesResult.error : 'Erro ao buscar schedules'
-                    };
-                }
-
-                const schedules = 'data' in schedulesResult ? schedulesResult.data : [];
-                defaultSchedule = schedules.find((s: any) => s.isDefault) || null;
-            }
-
-            if (!defaultSchedule) {
+            const defaultScheduleResult = await scheduleService.getDefaultSchedule(enterpriseEmail);
+            
+            if (!defaultScheduleResult.success || !('data' in defaultScheduleResult)) {
                 return {
                     success: false,
                     error: 'Nenhum horário padrão configurado para esta empresa'
                 };
             }
 
-            // Determinar o dia da semana (assumindo formato YYYY-MM-DD)
-            const dateObj = new Date(date + 'T00:00:00');
-            const dayIndex = dateObj.getDay(); // 0=Sunday ... 6=Saturday
+            const defaultSchedule = defaultScheduleResult.data;
+            const dayIndex = new Date(date + 'T00:00:00').getDay();
+            const dayNameEN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayIndex];
 
-            // Normalizações de nomes de dias para compatibilidade (English / Português)
-            const dayNamesEN = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
-            const dayNamesPT = ['domingo','segunda','terca','terça','quarta','quinta','sexta','sabado','sábado'];
-            const dayNameEN = dayNamesEN[dayIndex];
+            const dayAvailability = defaultSchedule?.availability?.find((avail: any) => 
+                avail?.days?.some((d: any) => 
+                    String(d).toLowerCase() === dayNameEN.toLowerCase() ||
+                    String(d) === String(dayIndex)
+                )
+            );
 
-            // Encontrar a disponibilidade para este dia com comparação tolerante
-            const availabilityArray = Array.isArray(defaultSchedule.availability) ? defaultSchedule.availability : [];
-
-            const dayAvailability = availabilityArray.find((avail: any) => {
-                if (!avail || !Array.isArray(avail.days)) return false;
-
-                // Normalizar os dias configurados
-                const normalizedDays = avail.days.map((d: any) => {
-                    if (typeof d === 'number') return String(d);
-                    if (typeof d === 'string') return d.toLowerCase().trim();
-                    return String(d);
-                });
-
-                // Possíveis matches:
-                // - contém o índice do dia (0..6) como string
-                // - contém o nome em inglês (monday)
-                // - contém o nome em português (segunda, terça, etc.)
-                if (normalizedDays.includes(String(dayIndex))) return true;
-                if (normalizedDays.includes(dayNameEN)) return true;
-
-                // Checar PT: verificar se alguma entrada começa com as 3 primeiras letras de PT (ex: 'seg' ou 'segunda')
-                const dayPtShort = ['domingo','segunda','terca','quarta','quinta','sexta','sabado'][dayIndex];
-                if (normalizedDays.some((d: string) => d.startsWith(dayPtShort.slice(0,3)))) return true;
-
-                // Checar se qualquer entrada em PT corresponde exatamente
-                if (normalizedDays.some((d: string) => dayNamesPT.includes(d))) return normalizedDays.some((d: string) => dayNamesPT.indexOf(d) === dayIndex);
-
-                return false;
-            });
-
-            if (!dayAvailability) {
-                return {
-                    success: true,
-                    data: [] // Nenhuma disponibilidade para este dia
-                };
+            if (!dayAvailability?.startTime || !dayAvailability?.endTime) {
+                return { success: true, data: [] };
             }
 
-            // Validar horário de início/fim
-            if (!dayAvailability.startTime || !dayAvailability.endTime) {
-                return {
-                    success: true,
-                    data: []
-                };
-            }
+            const bookingsResult = await this.getBookingsByDate(enterpriseEmail, date);
+            const bookings = bookingsResult.success ? (bookingsResult.data || []) : [];
+
+            const busySlots = bookings.map(booking => ({
+                start: this.timeToMinutes(booking.startTime),
+                end: this.timeToMinutes(booking.endTime)
+            }));
 
             const startMinutes = this.timeToMinutes(dayAvailability.startTime);
             const endMinutes = this.timeToMinutes(dayAvailability.endTime);
-
-            if (isNaN(startMinutes) || isNaN(endMinutes) || endMinutes <= startMinutes) {
-                return {
-                    success: true,
-                    data: []
-                };
-            }
-
-            // Intervalo de 15 minutos entre slots (pode ser parametrizado no futuro)
             const slotInterval = 15;
             const slots: AvailableSlot[] = [];
 
             for (let minutes = startMinutes; minutes <= endMinutes - duration; minutes += slotInterval) {
-                const slotStartTime = this.minutesToTime(minutes);
-                const slotEndTime = this.addMinutesToTime(slotStartTime, duration);
+                const slotStart = minutes;
+                const slotEnd = minutes + duration;
 
-                // Verificar se o slot está disponível
-                const availability = await this.isTimeSlotAvailable(
-                    enterpriseEmail,
-                    date,
-                    slotStartTime,
-                    duration
+                const hasConflict = busySlots.some(busy => 
+                    (slotStart >= busy.start && slotStart < busy.end) ||
+                    (slotEnd > busy.start && slotEnd <= busy.end) ||
+                    (slotStart <= busy.start && slotEnd >= busy.end)
                 );
 
-                if (availability.available) {
+                if (!hasConflict) {
                     slots.push({
-                        startTime: slotStartTime,
-                        endTime: slotEndTime,
+                        startTime: this.minutesToTime(slotStart),
+                        endTime: this.minutesToTime(slotEnd),
                         duration
                     });
                 }
@@ -274,19 +202,16 @@ export const bookingService = {
         }
     },
 
-    // Criar agendamento
     async createBooking(
         enterpriseEmail: string,
         bookingData: Omit<Booking, 'id' | 'enterpriseEmail' | 'endTime' | 'createdAt' | 'updatedAt'>
     ) {
         try {
-            // Verificar se a empresa existe
             const enterpriseCheck = await this.checkEnterpriseExists(enterpriseEmail);
             if (!enterpriseCheck.success) {
                 return enterpriseCheck;
             }
 
-            // Buscar dados do produto
             const productResult = await productService.getProductById(enterpriseEmail, bookingData.productId);
             if (!productResult.success) {
                 return {
@@ -305,7 +230,6 @@ export const bookingService = {
             const product = productResult.data as any;
             const endTime = this.addMinutesToTime(bookingData.startTime, product.duration);
 
-            // Verificar disponibilidade
             const availability = await this.isTimeSlotAvailable(
                 enterpriseEmail,
                 bookingData.date,
@@ -321,7 +245,6 @@ export const bookingService = {
                 };
             }
 
-            // Criar o agendamento
             const bookingsCollectionPath = `enterprises/${enterpriseEmail}/bookings`;
             const docRef = await addDoc(collection(db, bookingsCollectionPath), {
                 ...bookingData,
@@ -359,7 +282,6 @@ export const bookingService = {
         }
     },
 
-    // Confirmar agendamento
     async confirmBooking(enterpriseEmail: string, bookingId: string) {
         try {
             const bookingRef = doc(db, `enterprises/${enterpriseEmail}/bookings`, bookingId);
@@ -383,7 +305,6 @@ export const bookingService = {
         }
     },
 
-    // Listar agendamentos de uma empresa
     async getBookings(
         enterpriseEmail: string,
         date?: string,
@@ -398,21 +319,27 @@ export const bookingService = {
             const bookingsCollectionPath = `enterprises/${enterpriseEmail}/bookings`;
             let bookingsQuery = query(collection(db, bookingsCollectionPath));
 
-            // Adicionar filtros se fornecidos
             if (date) {
                 bookingsQuery = query(bookingsQuery, where('date', '==', date));
-            }
-            if (status) {
+            } else if (status) {
                 bookingsQuery = query(bookingsQuery, where('status', '==', status));
             }
 
-            bookingsQuery = query(bookingsQuery, orderBy('date'), orderBy('startTime'));
-
             const snapshot = await getDocs(bookingsQuery);
-            const bookings = snapshot.docs.map(doc => ({
+            let bookings = snapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data()
             }));
+
+            if (date && status) {
+                bookings = bookings.filter((booking: any) => booking.status === status);
+            }
+
+            bookings.sort((a: any, b: any) => {
+                const dateCompare = a.date.localeCompare(b.date);
+                if (dateCompare !== 0) return dateCompare;
+                return a.startTime.localeCompare(b.startTime);
+            });
 
             return {
                 success: true,

@@ -38,7 +38,6 @@ export interface Enterprise {
 }
 
 export const scheduleService = {
-    // Verificar se a empresa existe
     async checkEnterpriseExists(email: string) {
         try {
             const enterpriseRef = doc(db, 'enterprises', email);
@@ -61,7 +60,6 @@ export const scheduleService = {
         }
     },
 
-    // Criar um novo schedule para uma empresa
     async createSchedule(
         enterpriseEmail: string, 
         scheduleData: Omit<Schedule, 'id' | 'createdAt' | 'updatedAt'>
@@ -71,24 +69,19 @@ export const scheduleService = {
                 throw new Error('Email da empresa é obrigatório para criar um schedule');
             }
 
-            // Verificar se a empresa existe
             const enterpriseCheck = await this.checkEnterpriseExists(enterpriseEmail);
             if (!enterpriseCheck.success) {
                 return enterpriseCheck;
             }
 
-            // Caminho para a subcoleção de schedules da empresa
             const schedulesCollectionPath = `enterprises/${enterpriseEmail}/schedules`;
             
-            // Se o novo schedule for padrão, remover isDefault dos outros
             if (scheduleData.isDefault) {
                 await this.removeDefaultFromOthers(enterpriseEmail);
             }
             
-            // Usar o nome como ID do documento (limpar caracteres especiais)
             const documentId = this.sanitizeDocumentId(scheduleData.name);
 
-            // Verificar se já existe um schedule com esse nome
             const existingSchedule = await getDoc(doc(db, schedulesCollectionPath, documentId));
             if (existingSchedule.exists()) {
                 return {
@@ -97,7 +90,6 @@ export const scheduleService = {
                 };
             }
 
-            // Criar o documento com ID customizado
             await setDoc(doc(db, schedulesCollectionPath, documentId), {
                 ...scheduleData,
                 createdAt: Timestamp.now(),
@@ -120,24 +112,14 @@ export const scheduleService = {
         }
     },
 
-    // Buscar todos os schedules de uma empresa
     async getAllSchedules(enterpriseEmail: string) {
         try {
             if (!enterpriseEmail) {
                 throw new Error('Email da empresa é obrigatório');
             }
 
-            // Verificar se a empresa existe
-            const enterpriseCheck = await this.checkEnterpriseExists(enterpriseEmail);
-            if (!enterpriseCheck.success) {
-                return enterpriseCheck;
-            }
-
             const schedulesCollectionPath = `enterprises/${enterpriseEmail}/schedules`;
-            const q = query(
-                collection(db, schedulesCollectionPath),
-                orderBy('createdAt', 'desc')
-            );
+            const q = query(collection(db, schedulesCollectionPath));
 
             const querySnapshot = await getDocs(q);
             const schedules: Schedule[] = [];
@@ -150,6 +132,12 @@ export const scheduleService = {
                     createdAt: data.createdAt?.toDate(),
                     updatedAt: data.updatedAt?.toDate()
                 } as Schedule);
+            });
+
+            schedules.sort((a, b) => {
+                const aTime = a.createdAt?.getTime() || 0;
+                const bTime = b.createdAt?.getTime() || 0;
+                return bTime - aTime;
             });
 
             return {

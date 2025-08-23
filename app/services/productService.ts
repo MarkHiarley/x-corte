@@ -45,11 +45,6 @@ export const productService = {
 
     async getProducts(enterpriseEmail: string) {
         try {
-            const enterpriseCheck = await this.checkEnterpriseExists(enterpriseEmail);
-            if (!enterpriseCheck.success) {
-                return enterpriseCheck;
-            }
-
             const productsCollectionPath = `enterprises/${enterpriseEmail}/products`;
             const snapshot = await getDocs(collection(db, productsCollectionPath));
             
