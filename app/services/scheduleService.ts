@@ -85,16 +85,31 @@ export const scheduleService = {
                 await this.removeDefaultFromOthers(enterpriseEmail);
             }
             
-            const docRef = await addDoc(collection(db, schedulesCollectionPath), {
+            // Usar o nome como ID do documento (limpar caracteres especiais)
+            const documentId = this.sanitizeDocumentId(scheduleData.name);
+
+            // Verificar se já existe um schedule com esse nome
+            const existingSchedule = await getDoc(doc(db, schedulesCollectionPath, documentId));
+            if (existingSchedule.exists()) {
+                return {
+                    success: false,
+                    error: `Já existe um schedule com o nome '${scheduleData.name}'`
+                };
+            }
+
+            // Criar o documento com ID customizado
+            await setDoc(doc(db, schedulesCollectionPath, documentId), {
                 ...scheduleData,
                 createdAt: Timestamp.now(),
                 updatedAt: Timestamp.now()
             });
 
+            console.log(`Schedule criado com ID personalizado: ${documentId}`);
+
             return {
                 success: true,
-                id: docRef.id,
-                data: { id: docRef.id, ...scheduleData }
+                id: documentId,
+                data: { id: documentId, ...scheduleData }
             };
         } catch (error) {
             console.error('Erro ao criar schedule:', error);
@@ -354,5 +369,16 @@ export const scheduleService = {
         } catch (error) {
             console.error('Erro ao remover isDefault dos outros schedules:', error);
         }
-    }
+    },
+
+    // Função para limpar o nome e transformar em ID válido para o Firebase
+    sanitizeDocumentId(name: string): string {
+        return name
+            .toLowerCase()                    // Minúsculo
+            .trim()                          // Remove espaços nas bordas
+            .replace(/\s+/g, '-')           // Substitui espaços por hífen
+            .replace(/[^a-z0-9\-_]/g, '')   // Remove caracteres especiais
+            .replace(/--+/g, '-')           // Remove hífens duplos
+            .replace(/^-|-$/g, '');         // Remove hífens no início/fim
+    },
 };
